@@ -97,10 +97,9 @@ public class OllamaManager implements IModelManager {
 
             // Injects personaContext as 'system' prompt to keep it pinned/fresh
             IAGenerateRequest request = new IAGenerateRequest(modelName, userMessage, this.personaContext, currentContext, ollamaOptions, images);
-            String jsonBody = objectMapper.writeValueAsString(request);
-            logger.debug("Ollama translate request for session {} (Payload size: {} chars)", sessionId, jsonBody.length());
+            logger.debug("Ollama translate request for session {}", sessionId);
 
-            CompletableFuture<TranslationResult> future = makeRequest(jsonBody).thenApply(response -> {
+            CompletableFuture<TranslationResult> future = makeRequest(request).thenApply(response -> {
                 activeSessions.put(sessionId, response.context());
                 String rawResponse = response.response().trim();
                 
@@ -176,19 +175,18 @@ public class OllamaManager implements IModelManager {
             }
  
             IAGenerateRequest request = new IAGenerateRequest(modelName, promptBuilder.toString(), ollamaOptions);
-            String jsonBody = objectMapper.writeValueAsString(request);
-            logger.debug("Ollama init request for session {} (Model: {}, Payload size: {} chars)", sessionId, modelName, jsonBody.length());
+            logger.debug("Ollama init request for session {} (Model: {})", sessionId, modelName);
      
-            CompletableFuture<IAGenerateResponse> future = makeRequest(jsonBody);
+            CompletableFuture<IAGenerateResponse> future = makeRequest(request);
             pendingRequests.put(sessionId, future);
             IAGenerateResponse response = future.get(); // Block only on initialization
      
             // Stores the context vector returned by Ollama (Session Memory)
             activeSessions.put(sessionId, response.context());
-            logger.info("Session {} initialized. Ollama memory context updated.", sessionId);
+            logger.info("Session {} initialized. Ollama memory context updated. Time: {}ms", sessionId, response.totalDuration() / 1_000_000);
             return response.promptEvalCount();
-        } catch (InterruptedException | IOException e) {
-            logger.error("Failed to initialize user session {} due to an IO or interruption error.", sessionId, e);
+        } catch (InterruptedException e) {
+            logger.error("Failed to initialize user session {} due to an interruption error.", sessionId, e);
             throw new RuntimeException("Failed to initialize user session: " + sessionId, e);
         } catch (ExecutionException e) {
             Throwable cause = e.getCause();
@@ -204,29 +202,36 @@ public class OllamaManager implements IModelManager {
     }
 
     /** Makes a POST request to the Ollama API with the given JSON body. */
-    private CompletableFuture<IAGenerateResponse> makeRequest(String jsonBody) {
-        HttpRequest request = HttpRequest.newBuilder()
-                .uri(URI.create(ollamaUrl))
-                .header("Content-Type", "application/json")
-                .POST(HttpRequest.BodyPublishers.ofString(jsonBody))
-                .timeout(Duration.ofMinutes(10))
-                .build();
+    private CompletableFuture<IAGenerateResponse> makeRequest(Object requestBody) {
+        try {
+            // OPTIMIZATION: Serialize directly to byte[] to avoid large String allocation (UTF-16 overhead)
+            byte[] jsonBytes = objectMapper.writeValueAsBytes(requestBody);
+            logger.debug("Sending request to Ollama (Payload: {} bytes)...", jsonBytes.length);
 
-        logger.debug("Sending request to Ollama...");
-        return client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).thenApply(httpResponse -> {
-            logger.debug("Received response from Ollama (Status: {}).", httpResponse.statusCode());
-            if (httpResponse.statusCode() >= 200 && httpResponse.statusCode() < 300) {
-                try {
-                    return objectMapper.readValue(httpResponse.body(), IAGenerateResponse.class);
-                } catch (IOException e) {
-                    logger.error("Failed to parse Ollama response", e);
-                    throw new CompletionException(e);
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(ollamaUrl))
+                    .header("Content-Type", "application/json")
+                    .POST(HttpRequest.BodyPublishers.ofByteArray(jsonBytes))
+                    .timeout(Duration.ofMinutes(20))
+                    .build();
+
+            return client.sendAsync(request, HttpResponse.BodyHandlers.ofString()).thenApply(httpResponse -> {
+                logger.debug("Received response from Ollama (Status: {}).", httpResponse.statusCode());
+                if (httpResponse.statusCode() >= 200 && httpResponse.statusCode() < 300) {
+                    try {
+                        return objectMapper.readValue(httpResponse.body(), IAGenerateResponse.class);
+                    } catch (IOException e) {
+                        logger.error("Failed to parse Ollama response", e);
+                        throw new CompletionException(e);
+                    }
+                } else {
+                    logger.error("Ollama API returned error. Status: {}, Body: {}", httpResponse.statusCode(), httpResponse.body());
+                    throw new CompletionException(new IOException("Request to Ollama API failed with status code " + httpResponse.statusCode()));
                 }
-            } else {
-                logger.error("Ollama API returned error. Status: {}, Body: {}", httpResponse.statusCode(), httpResponse.body());
-                throw new CompletionException(new IOException("Request to Ollama API failed with status code " + httpResponse.statusCode()));
-            }
-        });
+            });
+        } catch (IOException e) {
+            return CompletableFuture.failedFuture(e);
+        }
     }
 
 }
