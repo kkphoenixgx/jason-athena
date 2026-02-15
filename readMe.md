@@ -25,11 +25,11 @@ O framework opera através da extensão da classe AgArch (Agent Architecture) do
 ## 🚀 Guia de Uso Rápido
 
 ### 1. Pré-requisitos
-Certifique-se de ter o **Ollama** instalado e rodando localmente com um modelo baixado (recomendado: `gemma2` ou `mistral`).
+Certifique-se de ter o **Ollama** instalado e rodando localmente com um modelo baixado (recomendado: `qwen2.5:0.5b` para mais leves e testes ou `ministral-3:3b` para computadores melhores ou ambientes de produção).
 
 ```bash
 ollama serve
-ollama pull gemma2
+ollama pull model
 ```
 
 ### 2. Implementação do Agente (.asl)
@@ -64,7 +64,7 @@ mas athena_test {
   
   addPersona("Você é um especialista em segurança predial.");
   reflectPlans;
-  startThink("qwen2.5:0.5b");
+  startThink("<<model>>");
   
   .print("Aguardando inicialização da IA...");
   .wait(incorporated);
