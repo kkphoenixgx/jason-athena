@@ -39,17 +39,20 @@ Para ativar o Athena, defina a arquitetura do agente e utilize as ações intern
 Se estiver usando a extensão JaCaMo no VSCode, crie um arquivo `.jcm` na raiz do projeto:
 
 ```java
-mas athena_project {
-    agent my_agent { //remember to change name if file name was changed
-        ag-arch: br.com.kkphoenix.Athena
-    }
-    class-path: lib/jason-athena-0.0.0.jar
+mas athena_test {
+
+  agent bob {
+    ag-arch: br.com.kkphoenix.Athena
+  }
+  
+  uses package: jasonEmbedded "com.github.chon-group:jasonEmbedded:25.8.20"
+  class-path: "lib/jason-athena-0.0.0.jar"
 }
+
 ```
 
 
 ```jason
-
 //? ----------- Initial goals -----------
 
 !start.
@@ -59,15 +62,17 @@ mas athena_project {
 +!start : true <-
   .print("Iniciando...");
   
-  .addPersona("Você é um especialista em segurança predial.");
-  .reflectPlans;
-  .startThink;
+  addPersona("Você é um especialista em segurança predial.");
+  reflectPlans;
+  startThink("qwen2.5:0.5b");
+  
+  .print("Aguardando inicialização da IA...");
+  .wait(incorporated);
 
   .print("Mente carregada. Consultando...");
   
   ask_llm("Analise meus planos. O que faço se perder a chave?");
   
   .print("Fim")
-
 .
 ```
