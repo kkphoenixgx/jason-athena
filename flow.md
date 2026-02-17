@@ -1,103 +1,88 @@
 # Fluxos de Execução do Framework Athena
 
-Esta documentação detalha o ciclo de vida da "consciência" do agente e como os dados fluem entre o Jason e o LLM.
+Esta documentação detalha o ciclo de vida da "consciência" do agente e a orquestração entre os componentes **Logos**, **Syllabus** e **Praxis**.
 
-## 1. Fluxo Principal: Inicialização da Consciência (Bootstrapping)
-Este fluxo prepara o "cérebro" do agente, carregando o contexto (quem ele é e o que sabe fazer) na memória do LLM.
+## 1. Fluxo de Inicialização (Bootstrapping)
+Prepara o "cérebro" do agente, carregando o contexto na memória da LLM e iniciando os monitores.
 
-1.  **Definição de Identidade e Conhecimento:**
-    *   O agente executa `.addPersona("Texto...")` no arquivo `.asl`.
-        *   **Código:** `Athena.handleAddPersona` armazena o texto na variável `personaContext`.
-    *   O agente executa `.reflectPlans` (via `ReflectPlans.java`).
-        *   **Código:** Lê o código fonte `.asl` do agente e o armazena no `StringBuilder masContext` dentro da classe `Athena`.
-2.  **Ativação (`.startThink`):**
-    *   O agente chama a ação interna `.startThink`.
-    *   **Athena:** Coleta o `masContext` (planos) e o `personaContext` e chama `aiService.initialize`.
-    *   **OllamaManager:**
-        *   Combina o Template + Persona + Planos em um único prompt inicial.
-        *   Envia para o Ollama.
-        *   **Crucial:** O Ollama retorna um vetor de contexto (`long[] context`). Este vetor representa o estado da rede neural após ler os planos do agente.
-        *   O `OllamaManager` salva esse vetor no mapa `activeSessions`.
-    *   **Retorno:** Ao finalizar, a classe `Athena` adiciona a crença `incorporated` na base de conhecimento do agente.
-    *   **Resultado:** O agente agora "sabe" que a IA leu seus planos e está pronta.
+1.  **Jason:** Inicia e executa o plano `!start`.
+2.  **Identidade:** Agente chama `.addPersona(...)` e `.reflectPlans`.
+    *   *Athena:* Carrega o código fonte `.asl` e o texto da persona na memória Java.
+3.  **Consciência:** Agente chama `.startThink(Modelo)`.
+    *   *Athena:* Inicializa o `AIService` (Lazy Load).
+    *   *Ollama:* Recebe o contexto inicial. Retorna vetor de memória.
+    *   *Athena:* Adiciona a crença `incorporated` ao agente.
+4.  **Autonomia:** Agente configura os componentes.
+    *   `Athena.Logos(...)`: Inicia a thread de monitoramento.
+    *   `Athena.Praxis.nap(...)`: Inicia a thread de limpeza de memória.
 
-## 2. Fluxo Principal: Ciclo de Raciocínio (Reasoning Loop)
-É o fluxo onde o agente faz perguntas e recebe orientações baseadas no contexto carregado anteriormente.
+## 2. Fluxo Principal: O Ciclo Cognitivo (The Heartbeat)
+Este é o loop autônomo gerenciado pelo **Logos**.
 
-1.  **A Pergunta (`ask_llm`):**
-    *   O agente executa `ask_llm("O que devo fazer agora?")`.
-    *   **Athena (`handleAskLlm`):** Verifica se existem imagens pendentes na lista `pendingImages`.
-2.  **Processamento (AIService -> OllamaManager):**
-    *   O `OllamaManager` recupera o vetor de contexto (`long[]`) da sessão atual.
-    *   Monta uma requisição (`IAGenerateRequest`) contendo:
-        *   O modelo (ex: gemma2).
-        *   A pergunta do usuário.
-        *   As imagens (se houver).
-        *   O vetor de contexto anterior (para manter a memória da conversa).
-        *   A `personaContext` (reenviada como *System Prompt* para reforçar o comportamento).
-3.  **Resposta do LLM:**
-    *   O Ollama processa e retorna o texto gerado + um **novo** vetor de contexto atualizado.
-    *   O `OllamaManager` atualiza a sessão com o novo vetor (aprendizado contínuo durante a conversa).
-    *   O texto bruto é fatiado em linhas (lista de Strings) pelo método `parseKqmlMessages`.
-4.  **Percepção (O Elo Perdido):**
-    *   A lista de Strings volta para a classe `Athena`.
-    *   **Atenção:** As mensagens devem ser convertidas em crenças (`addBel`) para que o agente possa reagir a elas.
+1.  **Monitoramento (Logos):**
+    *   Verifica a cada ciclo: `Tempo Ocioso > Timeout` OU `Crença Gatilho Ativa`.
+    *   Se verdadeiro e `Syllabus` não estiver ocupado: Dispara processo.
+2.  **Processamento (Syllabus.processKQMLSemanticParsing - Thread B):**
+    *   Recebe snapshot do estado (Persona, Planos, Input).
+    *   **Verificação de Persona:** Se mudou, reinicializa a sessão do Ollama.
+    *   **Geração:** Envia prompt para o Ollama.
+    *   **Tradução:** Recebe texto bruto e aplica Regex Estrito (filtra apenas comandos KQML).
+3.  **Injeção (Praxis):**
+    *   Recebe a lista de comandos limpos.
+    *   Valida sintaxe Jason.
+    *   Adiciona anotação `[source(athena), rationale("cognitive_inference")]`.
+    *   **Injeta** na Base de Crenças ou Biblioteca de Planos do agente.
+4.  **Pós-Processamento (Logos):**
+    *   Executa planos definidos em `postPlans` (ex: `!atualizar_interface`).
 
-## 3. Fluxos Alternativos (Gestão de Contexto Dinâmico)
+## 3. Fluxos Alternativos
 
-### A. Injeção de Imagens (Visão)
-Diferente de um chat normal, o agente pode "ver" coisas antes de perguntar.
-1.  O agente chama `.addContext("image", "/caminho/foto.jpg")`.
-2.  **Athena:** Lê o arquivo, converte para Base64 e **apenas armazena** na lista `pendingImages`.
-3.  A imagem **não** é enviada imediatamente ao LLM. Ela fica na fila de espera.
-4.  Na próxima vez que o agente chamar `ask_llm`, todas as imagens da fila são enviadas junto com a pergunta e a fila é limpa.
+### A. Interação Direta (`.ask_llm`)
+Usado quando o agente precisa de uma resposta imediata e bloqueante, sem passar pelo ciclo autônomo.
+1.  Agente chama `.ask_llm("Pergunta", Resposta)`.
+2.  Athena envia direto ao `AIService`.
+3.  Resposta é unificada na variável `Resposta`.
+4.  **Nota:** Não passa pelo Regex estrito do Syllabus nem pelo Praxis. Carrega apenas Persona e os Planos, não é um tradutor para KQML como o Syllabus.
 
-### B. Mudança de Personalidade em Tempo Real
-1.  O agente chama `.addPersona("Agora você é agressivo")`.
-2.  **Athena:** Atualiza a variável `personaContext`.
-3.  **OllamaManager:** O método `setPersonaContext` atualiza a referência volátil.
-4.  Na próxima requisição ao Ollama, o campo `system` do JSON levará a nova instrução, alterando o comportamento da IA imediatamente, mas mantendo a memória (`context vector`) do que já foi conversado.
+### B. Gestão de Memória (Praxis)
+O Praxis atua como um coletor de lixo para evitar que o agente fique lento com muitos planos gerados.
 
-## 4. Fluxo de Encerramento
-1.  O agente chama `.stopThink`.
-2.  **Athena:** Remove a crença `incorporated`.
-3.  **OllamaManager:** Remove a sessão do mapa `activeSessions` (o vetor de contexto é descartado, a "memória" da conversa é apagada).
+*   **Modo Nap (Crítico):**
+    *   Monitora RAM do Sistema (Linux `/proc/meminfo`).
+    *   Se `RAM > Threshold`: Executa GC agressivo. Se falhar, mata o processo Ollama.
+*   **Modo Collector (Preventivo):**
+    *   A cada `N` minutos, verifica planos com `source(athena)`.
+    *   Mantém os `Top X` mais usados.
+    *   Remove o restante da `PlanLibrary`.
 
-## 5. Fluxos de Exceção (O que acontece quando dá erro?)
-
-*   **Falha na Inicialização (Rede/Ollama desligado):**
-    *   Se o `initialize` falhar, a `CompletableFuture` lança exceção.
-    *   O `Athena` loga "CRITICAL FAILURE".
-    *   A crença `incorporated` **nunca** é adicionada. O agente fica esperando indefinidamente (se usar `.wait({+incorporated})`) ou falha o plano.
-*   **Erro no `ask_llm`:**
-    *   Se o Ollama retornar erro 500 ou timeout.
-    *   A ação `ask_llm` retorna `false` para o Jason.
-    *   Uma anotação de erro é gerada: `llm_error("mensagem do erro")`. O agente pode tratar isso com um plano de falha (`-!plano_falhou`).
-
-## 6. Resumo Visual dos Dados
+## 4. Diagrama de Sequência Simplificado
 
 ```mermaid
-Agente (.asl) 
-   | 
-   v
-Athena (Java) --[Acumula Contexto]--> StringBuilder (Planos)
-   |
-   v
-.startThink ------------------------> OllamaManager.initialize()
-                                            |
-                                            v
-                                      Ollama API (Gera Contexto Inicial)
-                                            |
-                                            v
-Agente <----[Crença 'incorporated']--- Athena
-   |
-   v
-ask_llm("Pergunta") ----------------> OllamaManager.translate()
-                                      (Envia: Pergunta + Imagens + Contexto[])
-                                            |
-                                            v
-                                      Ollama API (Responde + Novo Contexto[])
-                                            |
-                                            v
-Agente <----[addBel(Resposta)]-------- Athena (Necessita Patch)
+sequenceDiagram
+    participant Jason as Agente (.asl)
+    participant Logos as Logos (Observer)
+    participant Syllabus as Syllabus (Cortex)
+    participant Ollama as AI Service
+    participant Praxis as Praxis (Injector)
+
+    Jason->>Logos: Athena.Logos(Timeout, [Gatilhos])
+    loop Monitoramento
+        Logos->>Jason: Check Idle / Beliefs
+        opt Gatilho Disparado
+            Logos->>Syllabus: processKQMLSemanticParsing(Contexto)
+            activate Syllabus
+            Syllabus->>Ollama: ask(Prompt)
+            Ollama-->>Syllabus: Resposta Bruta
+            Syllabus->>Syllabus: Apply Regex
+            Syllabus->>Praxis: inject(Comandos)
+            deactivate Syllabus
+            
+            activate Praxis
+            Praxis->>Jason: addPlan / addEvent
+            Praxis-->>Logos: Done
+            deactivate Praxis
+            
+            Logos->>Jason: Execute PostPlans
+        end
+    end
 ```

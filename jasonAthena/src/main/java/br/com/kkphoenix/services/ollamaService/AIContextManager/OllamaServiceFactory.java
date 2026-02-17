@@ -17,11 +17,10 @@ public class OllamaServiceFactory {
 
     /**
      * Creates a fully configured instance of AIService reading from application.properties.
-     * @param sessionId The session ID for this service.
      * @param modelOverride Optional model name to override the default configuration.
      * @return A ready-to-use instance of AIService.
      */
-    public static AIService createService(String sessionId, String modelOverride) {
+    public static AIService createService(String modelOverride) {
         try {
             // 1. Load Properties
             Properties props = new Properties();
@@ -40,39 +39,22 @@ public class OllamaServiceFactory {
                 modelName = modelOverride;
             }
             
-            String contextPath = props.getProperty("ollama.model.context-path");
-
-            // 3. Load Context Template
-            String templateContent = "";
-            if (contextPath != null && contextPath.startsWith("classpath:")) {
-                String resourcePath = contextPath.replace("classpath:", "");
-                // Remove leading slash if exists to ensure compatibility with getResourceAsStream
-                if (resourcePath.startsWith("/")) resourcePath = resourcePath.substring(1);
-                
-                try (InputStream is = OllamaServiceFactory.class.getClassLoader().getResourceAsStream(resourcePath)) {
-                    if (is == null) throw new IOException("Template not found: " + resourcePath);
-                    templateContent = FileUtil.readStreamAsString(is);
-                }
-            } else {
-                throw new IllegalArgumentException("Context path must start with 'classpath:' in this framework.");
-            }
-
             // 4. Instantiate Dependencies
             HttpClient client = HttpClient.newHttpClient();
             ObjectMapper mapper = new ObjectMapper();
 
             // 5. Assemble Manager and Service
-            IModelManager manager = new OllamaManager(client, mapper, ollamaUrl, modelName, templateContent);
+            IModelManager manager = new OllamaManager(client, mapper, ollamaUrl, modelName);
             
             // EMBEDDED OPTIMIZATION: Use FixedThreadPool to avoid resource exhaustion (CPU/RAM)
-            return new AIService(manager, sessionId, Executors.newFixedThreadPool(2));
+            return new AIService(manager, Executors.newFixedThreadPool(2));
 
         } catch (IOException e) {
             throw new RuntimeException("Failed to initialize OllamaServiceFactory", e);
         }
     }
 
-    public static AIService createService(String sessionId) {
-        return createService(sessionId, null);
+    public static AIService createService() {
+        return createService(null);
     }
 }

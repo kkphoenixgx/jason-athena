@@ -8,11 +8,10 @@ import java.time.Duration;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
-import java.util.stream.Collectors;
-import java.util.concurrent.ExecutionException;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.stream.Collectors;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -37,20 +36,12 @@ public class OllamaManager implements IModelManager {
     private final String ollamaUrl;
     private final String modelName;
     
-    // The Context Template (Translation-Context or Persona-Context)
-    private String contextTemplate;
-    
-    // Volatile ensures immediate visibility between threads when persona is updated
-    private volatile String personaContext = "";
-
     private final OllamaOptions ollamaOptions = new OllamaOptions(
         4096
     );
 
     // Active Sessions armazena o "Context Vector" (long[]), que é a memória técnica 
-    // da conversa mantida pelo Ollama (não confundir com o texto de contexto do agente).
-    // Active Sessions stores the "Context Vector" (long[]), which is the technical memory
-    // of the conversation maintained by Ollama (not to be confused with the agent's context text).
+    // da conversa mantida pelo Ollama.
     private final Map<String, long[]> activeSessions = new ConcurrentHashMap<>();
     private final Map<String, CompletableFuture<?>> pendingRequests = new ConcurrentHashMap<>();
 
@@ -60,54 +51,41 @@ public class OllamaManager implements IModelManager {
      * @param objectMapper The Jackson Object Mapper.
      * @param ollamaUrl The URL of the Ollama API.
      * @param modelName The name of the model to use (e.g., "gemma:2b").
-     * @param contextTemplate The content of the context prompt template string.
      */
-    public OllamaManager(HttpClient client, ObjectMapper objectMapper, String ollamaUrl, String modelName, String contextTemplate) {
+    public OllamaManager(HttpClient client, ObjectMapper objectMapper, String ollamaUrl, String modelName) {
         this.client = client;
         this.objectMapper = objectMapper;
         this.ollamaUrl = ollamaUrl;
         this.modelName = modelName;
-        this.contextTemplate = contextTemplate;
     }
 
-    @Override
-    public void setContextTemplate(String contextTemplate) {
-        this.contextTemplate = contextTemplate;
-    }
-
-    @Override
-    public void setPersonaContext(String personaContext) {
-        this.personaContext = personaContext;
-    }
-
-    /** Translates a user message into a list of KQML commands using the session context. */
     @Override
     public CompletableFuture<TranslationResult> translateMessage(String sessionId, String userMessage) {
-        return translateMessage(sessionId, userMessage, null);
+        return translateMessage(sessionId, null, userMessage, null, null);
     }
 
-    /** Overload to support images in the translation request. */
     @Override
-    public CompletableFuture<TranslationResult> translateMessage(String sessionId, String userMessage, List<String> images) {
+    public CompletableFuture<TranslationResult> translateMessage(String sessionId, String modelOverride, String userMessage, String systemPrompt, List<String> images) {
         try {
             final long[] currentContext = activeSessions.get(sessionId);
             if (currentContext == null) {
                 throw new IllegalStateException("Error: User session was not correctly initialized.");
             }
 
-            // Injects personaContext as 'system' prompt to keep it pinned/fresh
-            IAGenerateRequest request = new IAGenerateRequest(modelName, userMessage, this.personaContext, currentContext, ollamaOptions, images);
+            // System prompt is now passed dynamically per request (Context Injection)
+            String targetModel = (modelOverride != null && !modelOverride.isEmpty()) ? modelOverride : this.modelName;
+            IAGenerateRequest request = new IAGenerateRequest(targetModel, userMessage, systemPrompt, currentContext, ollamaOptions, images);
             logger.debug("Ollama translate request for session {}", sessionId);
 
             CompletableFuture<TranslationResult> future = makeRequest(request).thenApply(response -> {
                 activeSessions.put(sessionId, response.context());
                 String rawResponse = response.response().trim();
                 
-                logger.info("Ollama raw response for session {}: {}", sessionId, rawResponse);
-               
-                List<String> kqmlMessages = parseKqmlMessages(rawResponse);
+                // Raw output for now, Syllabus will handle strict parsing later
+                List<String> messages = parseKqmlMessages(rawResponse);
+                
                 return new TranslationResult(
-                    kqmlMessages, 
+                    messages, 
                     response.promptEvalCount(),
                     response.evalCount(),
                     response.totalDuration(),
@@ -125,7 +103,6 @@ public class OllamaManager implements IModelManager {
         }
     }
 
-    /** Parses the raw text response into a list of non-empty lines (KQML commands). */
     private List<String> parseKqmlMessages(String rawResponse) {
         return rawResponse.lines()
                           .map(String::trim)
@@ -133,71 +110,26 @@ public class OllamaManager implements IModelManager {
                           .collect(Collectors.toList());
     }
 
-    /** Ends the AI model session for the given session ID. */
     @Override
     public void endSession(String sessionId) {
-        if (activeSessions.remove(sessionId) != null) {
-            logger.info("AI model session ended for: {}", sessionId);
-        }
-        // Cancels any pending request for this session
+        activeSessions.remove(sessionId);
         CompletableFuture<?> pending = pendingRequests.remove(sessionId);
-        if (pending != null && !pending.isDone()) {
-            pending.cancel(true);
-            logger.warn("Cancelled pending AI request for session {}", sessionId);
-        }
+        if (pending != null) pending.cancel(true);
+        logger.info("Session {} terminated and context cleared.", sessionId);
     }
 
-    /** Initializes a user session with the base context and agent-specific plans. */
     @Override
-    public int initializeUserSession(String sessionId, String agentPlans) {
+    public int initializeSession(String sessionId, String prompt) {
         try {
-            // Prepares MAS-Context (Agent Plans)
-            logger.debug("MAS-Context (Agent Plans) loaded size: {}", agentPlans.length());
-
-            // Combines with Translation-Context or Persona-Context (Template)
-            // The template must contain the placeholder ##PLANOS_DO_AGENTE##
-            // OPTIMIZATION: Use StringBuilder to avoid multiple large String allocations
-            StringBuilder promptBuilder = new StringBuilder(contextTemplate.length() + agentPlans.length() + 500);
-
-            // Injects Persona Context if it exists
-            if (this.personaContext != null && !this.personaContext.isEmpty()) {
-                promptBuilder.append(this.personaContext).append("\n\n");
-            }
+            IAGenerateRequest request = new IAGenerateRequest(modelName, prompt, ollamaOptions);
             
-            // OTIMIZAÇÃO AVANÇADA: Evita criar string temporária com .replace()
-            int placeholderIdx = contextTemplate.indexOf("##PLANOS_DO_AGENTE##");
-            if (placeholderIdx != -1) {
-                promptBuilder.append(contextTemplate, 0, placeholderIdx);
-                promptBuilder.append(agentPlans);
-                promptBuilder.append(contextTemplate, placeholderIdx + "##PLANOS_DO_AGENTE##".length(), contextTemplate.length());
-            } else {
-                promptBuilder.append(contextTemplate);
-            }
- 
-            IAGenerateRequest request = new IAGenerateRequest(modelName, promptBuilder.toString(), ollamaOptions);
-            logger.debug("Ollama init request for session {} (Model: {})", sessionId, modelName);
-     
-            CompletableFuture<IAGenerateResponse> future = makeRequest(request);
-            pendingRequests.put(sessionId, future);
-            IAGenerateResponse response = future.get(); // Block only on initialization
-     
-            // Stores the context vector returned by Ollama (Session Memory)
+            // Synchronous block for initialization (Bootstrapping)
+            IAGenerateResponse response = makeRequest(request).get();
+            
             activeSessions.put(sessionId, response.context());
-            logger.info("Session {} initialized. Ollama memory context updated. Time: {}ms", sessionId, response.totalDuration() / 1_000_000);
             return response.promptEvalCount();
-        } catch (InterruptedException e) {
-            logger.error("Failed to initialize user session {} due to an interruption error.", sessionId, e);
-            throw new RuntimeException("Failed to initialize user session: " + sessionId, e);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            if (cause instanceof IOException) {
-                logger.error("Failed to initialize user session {} due to a network error: {}", sessionId, cause.getMessage());
-
-                throw new RuntimeException("Cannot connect to AI model. Please check network connectivity and firewall settings.", cause);
-            }
-            throw new RuntimeException("An unexpected error occurred during AI session initialization.", e);
-        } finally {
-            pendingRequests.remove(sessionId);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to initialize session: " + sessionId, e);
         }
     }
 
